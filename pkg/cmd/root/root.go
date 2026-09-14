@@ -21,6 +21,7 @@ import (
 	completionCmd "github.com/cli/cli/v2/pkg/cmd/completion"
 	configCmd "github.com/cli/cli/v2/pkg/cmd/config"
 	copilotCmd "github.com/cli/cli/v2/pkg/cmd/copilot"
+	discussionCmd "github.com/cli/cli/v2/pkg/cmd/discussion"
 	extensionCmd "github.com/cli/cli/v2/pkg/cmd/extension"
 	"github.com/cli/cli/v2/pkg/cmd/factory"
 	gistCmd "github.com/cli/cli/v2/pkg/cmd/gist"
@@ -28,6 +29,7 @@ import (
 	issueCmd "github.com/cli/cli/v2/pkg/cmd/issue"
 	labelCmd "github.com/cli/cli/v2/pkg/cmd/label"
 	licensesCmd "github.com/cli/cli/v2/pkg/cmd/licenses"
+	mcpCmd "github.com/cli/cli/v2/pkg/cmd/mcp"
 	orgCmd "github.com/cli/cli/v2/pkg/cmd/org"
 	prCmd "github.com/cli/cli/v2/pkg/cmd/pr"
 	previewCmd "github.com/cli/cli/v2/pkg/cmd/preview"
@@ -152,11 +154,12 @@ func NewCmdRoot(f *cmdutil.Factory, telemetry ghtelemetry.CommandRecorder, versi
 	cmd.AddCommand(skillsCmd.NewCmdSkills(f, telemetry))
 
 	// Root commands with standalone functionality and no subcommands
-	cmd.AddCommand(copilotCmd.NewCmdCopilot(f, nil))
+	cmd.AddCommand(copilotCmd.NewCmdCopilot(f, telemetry, nil))
 	cmd.AddCommand(statusCmd.NewCmdStatus(f, nil))
 	cmd.AddCommand(creditsCmd.NewCmdCredits(f, nil))
 	cmd.AddCommand(licensesCmd.NewCmdLicenses(f))
 	cmd.AddCommand(sendTelemetryCmd.NewCmdSendTelemetry(f))
+	cmd.AddCommand(mcpCmd.NewCmdMcp(f))
 
 	// below here at the commands that require the "intelligent" BaseRepo resolver
 	repoResolvingCmdFactory := *f
@@ -164,6 +167,7 @@ func NewCmdRoot(f *cmdutil.Factory, telemetry ghtelemetry.CommandRecorder, versi
 
 	cmd.AddCommand(agentTaskCmd.NewCmdAgentTask(&repoResolvingCmdFactory))
 	cmd.AddCommand(browseCmd.NewCmdBrowse(&repoResolvingCmdFactory, nil))
+	cmd.AddCommand(discussionCmd.NewCmdDiscussion(&repoResolvingCmdFactory))
 	cmd.AddCommand(prCmd.NewCmdPR(&repoResolvingCmdFactory))
 	cmd.AddCommand(orgCmd.NewCmdOrg(&repoResolvingCmdFactory))
 	cmd.AddCommand(issueCmd.NewCmdIssue(&repoResolvingCmdFactory))

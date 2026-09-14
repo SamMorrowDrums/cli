@@ -64,7 +64,7 @@ type tagEntry struct {
 
 // rulesetsResponse is a single ruleset from the rulesets API.
 type rulesetsResponse struct {
-	ID          int    `json:"id"`
+	ID          int64  `json:"id"`
 	Name        string `json:"name"`
 	Target      string `json:"target"`
 	Enforcement string `json:"enforcement"`
@@ -968,7 +968,7 @@ func detectGitHubRemote(gitClient *git.Client, dir string) (*gitHubRemote, error
 }
 
 // parseGitHubURL extracts owner/repo from a GitHub remote URL.
-// Only GitHub.com URLs are recognized.
+// Only github.com and GHEC data residency (*.ghe.com) URLs are recognized.
 func parseGitHubURL(rawURL string) (ghrepo.Interface, error) {
 	u, err := git.ParseURL(rawURL)
 	if err != nil {

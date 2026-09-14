@@ -26,6 +26,7 @@ import (
 	"github.com/cli/cli/v2/internal/gh/ghtelemetry"
 	"github.com/cli/cli/v2/internal/telemetry"
 	"github.com/cli/cli/v2/internal/update"
+	"github.com/cli/cli/v2/pkg/cmd/auth/shared"
 	"github.com/cli/cli/v2/pkg/cmd/factory"
 	"github.com/cli/cli/v2/pkg/cmd/root"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -70,11 +71,15 @@ func Main() exitCode {
 	ghExecutablePath := executablePath("gh")
 
 	additionalCommonDimensions := ghtelemetry.Dimensions{
-		"version":        strings.TrimPrefix(buildVersion, "v"),
-		"is_tty":         strconv.FormatBool(ioStreams.IsStdoutTTY()),
-		"agent":          string(agents.Detect()),
-		"ci":             strconv.FormatBool(ci.IsCI()),
-		"github_actions": strconv.FormatBool(ci.IsGitHubActions()),
+		"version":             strings.TrimPrefix(buildVersion, "v"),
+		"is_tty":              strconv.FormatBool(ioStreams.IsStdoutTTY()),
+		"agent":               string(agents.Detect()),
+		"ci":                  strconv.FormatBool(ci.IsCI()),
+		"github_actions":      strconv.FormatBool(ci.IsGitHubActions()),
+		"accessible_colors":   strconv.FormatBool(ioStreams.AccessibleColorsEnabled()),
+		"accessible_prompter": strconv.FormatBool(ioStreams.AccessiblePrompterEnabled()),
+		"color_labels":        strconv.FormatBool(ioStreams.ColorLabels()),
+		"spinner_disabled":    strconv.FormatBool(ioStreams.GetSpinnerDisabled()),
 	}
 
 	var telemetryService ghtelemetry.Service
@@ -227,7 +232,11 @@ func Main() exitCode {
 
 		var httpErr api.HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == 401 {
-			fmt.Fprintln(stderr, "Try authenticating with:  gh auth login")
+			authCommand := "gh auth login"
+			if cfg, cfgErr := cmdFactory.Config(); cfgErr == nil {
+				authCommand = authRecoveryCommand(cfg, httpErr)
+			}
+			fmt.Fprintf(stderr, "Try authenticating with:  %s\n", authCommand)
 		} else if u := factory.SSOURL(); u != "" {
 			// handles organization SAML enforcement error
 			fmt.Fprintf(stderr, "Authorize in your web browser:  %s\n", u)
@@ -289,6 +298,20 @@ func printError(out io.Writer, err error, cmd *cobra.Command, debug bool) {
 		}
 		fmt.Fprintln(out, cmd.UsageString())
 	}
+}
+
+func authRecoveryCommand(cfg gh.Config, httpErr api.HTTPError) string {
+	if httpErr.RequestURL == nil {
+		return "gh auth login"
+	}
+
+	hostname := ghauth.NormalizeHostname(httpErr.RequestURL.Hostname())
+	token, source := cfg.Authentication().ActiveToken(hostname)
+	if shared.AuthTokenRefreshable(token, source) {
+		return fmt.Sprintf("gh auth refresh -h %s", hostname)
+	}
+
+	return fmt.Sprintf("gh auth login -h %s", hostname)
 }
 
 func checkForUpdate(ctx context.Context, f *cmdutil.Factory, currentVersion string) (*update.ReleaseInfo, error) {

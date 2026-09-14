@@ -24,6 +24,7 @@ import (
 	"github.com/cli/cli/v2/internal/skills/installer"
 	"github.com/cli/cli/v2/internal/skills/registry"
 	"github.com/cli/cli/v2/internal/skills/source"
+	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
@@ -55,6 +56,7 @@ type InstallOptions struct {
 	ScopeChanged    bool // true when --scope was explicitly set
 	Pin             string
 	Dir             string // overrides --agent and --scope
+	All             bool
 	Force           bool
 	FromLocal       bool // treat SkillSource as a local directory path
 	AllowHiddenDirs bool // include skills in dot-prefixed directories
@@ -115,8 +117,10 @@ func NewCmdInstall(f *cmdutil.Factory, telemetry ghtelemetry.CommandRecorder, ru
 			see: https://agentskills.io/specification
 
 			The skill argument can be a name, a namespaced name (%[1]sauthor/skill%[1]s),
-			or an exact path within the repository (%[1]sskills/author/skill%[1]s or
-			%[1]sskills/author/skill/SKILL.md%[1]s).
+			or an exact path within the repository (%[1]sskills/author/skill%[1]s,
+			%[1]spackages/agent-skills/code-review%[1]s, or any %[1]s.../SKILL.md%[1]s path).
+			Namespaced names with one slash are matched by name. Use a %[1]sSKILL.md%[1]s
+			suffix to force a one-directory path outside the standard conventions.
 
 			Performance tip: when installing from a large repository with many
 			skills, providing an exact path instead of a skill name avoids a
@@ -136,8 +140,13 @@ func NewCmdInstall(f *cmdutil.Factory, telemetry ghtelemetry.CommandRecorder, ru
 			enables %[1]sgh skill update%[1]s to detect changes.
 
 			When run interactively, the command prompts for any missing arguments.
-			When run non-interactively, %[1]srepository%[1]s and a skill name are
-			required.
+
+			Use %[1]s--all%[1]s to install every discovered skill from the repository
+			without prompting for skill selection. When run non-interactively,
+			%[1]srepository%[1]s is required; without a skill name or %[1]s--all%[1]s the
+			matching skills are listed (as tab-separated values when piped) so you can
+			browse or filter them with tools like %[1]sgrep%[1]s before re-running with
+			a specific skill.
 		`, "`", registry.AgentHelpList()),
 		Example: heredoc.Doc(`
 			# Interactive: choose repo, skill, and agent
@@ -146,14 +155,23 @@ func NewCmdInstall(f *cmdutil.Factory, telemetry ghtelemetry.CommandRecorder, ru
 			# Choose a skill from the repo interactively
 			$ gh skill install github/awesome-copilot
 
+			# List available skills non-interactively (e.g. to pipe into grep)
+			$ gh skill install github/awesome-copilot | grep review
+
 			# Install a specific skill
 			$ gh skill install github/awesome-copilot git-commit
+
+			# Install all skills from a repository
+			$ gh skill install github/awesome-copilot --all
 
 			# Install a specific version
 			$ gh skill install github/awesome-copilot git-commit@v1.2.0
 
 			# Install from a large namespaced repo by path (efficient, skips full discovery)
 			$ gh skill install github/awesome-copilot skills/monalisa/code-review
+
+			# Install from a non-standard nested path (efficient, skips full discovery)
+			$ gh skill install monalisa/skills-repo packages/agent-skills/code-review
 
 			# Install from a local directory
 			$ gh skill install ./my-skills-repo --from-local
@@ -180,6 +198,10 @@ func NewCmdInstall(f *cmdutil.Factory, telemetry ghtelemetry.CommandRecorder, ru
 				opts.SkillName = args[1]
 			}
 			opts.ScopeChanged = cmd.Flags().Changed("scope")
+
+			if opts.All && opts.SkillName != "" {
+				return cmdutil.FlagErrorf("cannot use --all with a skill argument")
+			}
 
 			// Resolve the source type early so installRun can branch directly.
 			if opts.FromLocal {
@@ -215,6 +237,7 @@ func NewCmdInstall(f *cmdutil.Factory, telemetry ghtelemetry.CommandRecorder, ru
 	cmdutil.StringEnumFlag(cmd, &opts.Scope, "scope", "", "project", []string{"project", "user"}, "Installation scope")
 	cmd.Flags().StringVar(&opts.Pin, "pin", "", "Pin to a specific git tag or commit SHA")
 	cmd.Flags().StringVar(&opts.Dir, "dir", "", "Install to a custom directory (overrides --agent and --scope)")
+	cmd.Flags().BoolVar(&opts.All, "all", false, "Install all skills without prompting for skill selection")
 	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "Overwrite existing skills without prompting")
 	cmd.Flags().BoolVar(&opts.FromLocal, "from-local", false, "Treat the argument as a local directory path instead of a repository")
 	cmd.Flags().BoolVar(&opts.AllowHiddenDirs, "allow-hidden-dirs", false, "Include skills in hidden directories (e.g. .claude/skills/, .agents/skills/)")
@@ -276,7 +299,7 @@ func installRun(opts *InstallOptions) error {
 
 	var selectedSkills []discovery.Skill
 
-	if isSkillPath(opts.SkillName) {
+	if discovery.IsSkillPath(opts.SkillName) {
 		opts.IO.StartProgressIndicatorWithLabel("Looking up skill")
 		skill, err := discovery.DiscoverSkillByPath(apiClient, hostname, opts.repo.RepoOwner(), opts.repo.RepoName(), resolved.SHA, opts.SkillName)
 		opts.IO.StopProgressIndicator()
@@ -300,6 +323,9 @@ func installRun(opts *InstallOptions) error {
 			},
 		})
 		if err != nil {
+			if errors.Is(err, errSkillsListed) {
+				return nil
+			}
 			return err
 		}
 	}
@@ -391,7 +417,7 @@ func installRun(opts *InstallOptions) error {
 			}
 
 			printFileTree(opts.IO.ErrOut, cs, result.Dir, result.Installed)
-			printReviewHint(opts.IO.ErrOut, cs, repoSource, resolved.SHA, result.Installed)
+			printReviewHint(opts.IO.ErrOut, cs, repoSource, resolved.SHA, result.Installed, opts.AllowHiddenDirs)
 			printHostHints(opts.IO.ErrOut, cs, plan.hosts, result.Installed, result.Dir, gitRoot)
 		}
 
@@ -493,6 +519,9 @@ func runLocalInstall(opts *InstallOptions) error {
 		sourceHint:  absSource,
 	})
 	if err != nil {
+		if errors.Is(err, errSkillsListed) {
+			return nil
+		}
 		return err
 	}
 
@@ -536,29 +565,11 @@ func runLocalInstall(opts *InstallOptions) error {
 		}
 
 		printFileTree(opts.IO.ErrOut, cs, result.Dir, result.Installed)
-		printReviewHint(opts.IO.ErrOut, cs, "", "", result.Installed)
+		printReviewHint(opts.IO.ErrOut, cs, "", "", result.Installed, false)
 		printHostHints(opts.IO.ErrOut, cs, plan.hosts, result.Installed, result.Dir, gitRoot)
 	}
 
 	return nil
-}
-
-// isSkillPath returns true if the argument looks like a repo-relative path
-// rather than a simple skill name.
-func isSkillPath(name string) bool {
-	if name == "" {
-		return false
-	}
-	if name == "SKILL.md" || strings.HasSuffix(name, "/SKILL.md") {
-		return true
-	}
-	if strings.HasPrefix(name, "skills/") || strings.HasPrefix(name, "plugins/") {
-		return true
-	}
-	if strings.Contains(name, "/skills/") || strings.Contains(name, "/plugins/") {
-		return true
-	}
-	return false
 }
 
 func resolveRepoArg(skillSource string, canPrompt bool, p prompter.Prompter) (ghrepo.Interface, string, error) {
@@ -673,6 +684,12 @@ type installPlan struct {
 	skills []discovery.Skill
 }
 
+// errSkillsListed is a sentinel returned by selectSkillsWithSelector when
+// the command runs non-interactively without a skill name. In that case the
+// selector prints the available skills to stdout (so they can be piped into
+// grep or similar) and the caller exits without installing.
+var errSkillsListed = errors.New("skills listed")
+
 func selectSkillsWithSelector(opts *InstallOptions, skills []discovery.Skill, canPrompt bool, sel skillSelector) ([]discovery.Skill, error) {
 	checkCollisions := func(ss []discovery.Skill) error {
 		if err := collisionError(ss); err != nil {
@@ -682,12 +699,22 @@ func selectSkillsWithSelector(opts *InstallOptions, skills []discovery.Skill, ca
 		return nil
 	}
 
+	if opts.All {
+		if err := checkCollisions(skills); err != nil {
+			return nil, err
+		}
+		return skills, nil
+	}
+
 	if opts.SkillName != "" {
 		return sel.matchByName(opts, skills)
 	}
 
 	if !canPrompt {
-		return nil, cmdutil.FlagErrorf("must specify a skill name when not running interactively")
+		if err := listAvailableSkills(opts, skills, sel); err != nil {
+			return nil, err
+		}
+		return nil, errSkillsListed
 	}
 
 	if sel.fetchDescriptions != nil {
@@ -729,6 +756,43 @@ func selectSkillsWithSelector(opts *InstallOptions, skills []discovery.Skill, ca
 		return nil, err
 	}
 	return result, checkCollisions(result)
+}
+
+// listAvailableSkills prints discovered skills as a table for non-interactive
+// callers, mirroring the information shown in the interactive picker so the
+// output can be browsed or piped into tools like grep.
+func listAvailableSkills(opts *InstallOptions, skills []discovery.Skill, sel skillSelector) error {
+	if len(skills) == 0 {
+		return fmt.Errorf("no skills found in %s", sel.sourceHint)
+	}
+
+	if sel.fetchDescriptions != nil {
+		sel.fetchDescriptions()
+	}
+
+	if opts.IO.IsStdoutTTY() {
+		fmt.Fprintf(opts.IO.ErrOut, "Showing %s from %s. Re-run with a skill name to install.\n\n",
+			text.Pluralize(len(skills), "skill"), sel.sourceHint)
+	}
+
+	tw := opts.IO.TerminalWidth()
+	descWidth := tw - 40
+	if descWidth < 20 {
+		descWidth = 20
+	}
+	isTTY := opts.IO.IsStdoutTTY()
+
+	table := tableprinter.New(opts.IO, tableprinter.WithHeader("SKILL", "DESCRIPTION"))
+	for _, s := range skills {
+		table.AddField(s.DisplayName())
+		desc := s.Description
+		if isTTY {
+			desc = text.Truncate(descWidth, desc)
+		}
+		table.AddField(desc)
+		table.EndRow()
+	}
+	return table.Render()
 }
 
 func matchSkillByName(opts *InstallOptions, skills []discovery.Skill) ([]discovery.Skill, error) {
@@ -971,7 +1035,7 @@ func truncateDescription(s string, maxWidth int) string {
 func checkOverwrite(opts *InstallOptions, skills []discovery.Skill, targetDir string, canPrompt bool) ([]discovery.Skill, error) {
 	var existing, fresh []discovery.Skill
 	for _, s := range skills {
-		dir := filepath.Join(targetDir, filepath.FromSlash(s.InstallName()))
+		dir := filepath.Join(targetDir, s.Name)
 		if _, err := os.Stat(dir); err == nil {
 			existing = append(existing, s)
 		} else {
@@ -1013,7 +1077,7 @@ func checkOverwrite(opts *InstallOptions, skills []discovery.Skill, targetDir st
 }
 
 func existingSkillPrompt(targetDir string, incoming discovery.Skill) string {
-	skillFile := filepath.Join(targetDir, filepath.FromSlash(incoming.InstallName()), "SKILL.md")
+	skillFile := filepath.Join(targetDir, incoming.Name, "SKILL.md")
 	data, err := os.ReadFile(skillFile)
 	if err != nil {
 		return fmt.Sprintf("Skill %q already exists. Overwrite?", incoming.DisplayName())
@@ -1118,8 +1182,10 @@ func printPreInstallDisclaimer(w io.Writer, cs *iostreams.ColorScheme) {
 
 // printReviewHint warns the user to review installed skills and suggests preview commands.
 // When sha is non-empty the suggested commands include @SHA so the user previews
-// exactly the version that was installed.
-func printReviewHint(w io.Writer, cs *iostreams.ColorScheme, repo, sha string, skillNames []string) {
+// exactly the version that was installed. When allowHiddenDirs is true, the
+// suggested commands include --allow-hidden-dirs so previewing hidden-dir
+// skills works without an extra manual step.
+func printReviewHint(w io.Writer, cs *iostreams.ColorScheme, repo, sha string, skillNames []string, allowHiddenDirs bool) {
 	if len(skillNames) == 0 {
 		return
 	}
@@ -1130,11 +1196,15 @@ func printReviewHint(w io.Writer, cs *iostreams.ColorScheme, repo, sha string, s
 	}
 	fmt.Fprintln(w, "  Review installed content before use:")
 	fmt.Fprintln(w)
+	hiddenFlag := ""
+	if allowHiddenDirs {
+		hiddenFlag = " --allow-hidden-dirs"
+	}
 	for _, name := range skillNames {
 		if sha != "" {
-			fmt.Fprintf(w, "    gh skill preview %s %s@%s\n", repo, name, sha)
+			fmt.Fprintf(w, "    gh skill preview %s %s@%s%s\n", repo, name, sha, hiddenFlag)
 		} else {
-			fmt.Fprintf(w, "    gh skill preview %s %s\n", repo, name)
+			fmt.Fprintf(w, "    gh skill preview %s %s%s\n", repo, name, hiddenFlag)
 		}
 	}
 	fmt.Fprintln(w)
@@ -1180,10 +1250,9 @@ func kiroResourcePath(installDir, gitRoot string) string {
 	return filepath.ToSlash(installDir)
 }
 
-// filterHiddenDirSkills separates hidden-dir skills from the full list and
-// applies the --allow-hidden-dirs flag logic. When the flag is set, all skills
-// are returned and a warning is printed. When the flag is not set, hidden-dir
-// skills are excluded and an error is returned if no standard skills remain.
+// filterHiddenDirSkills applies the --allow-hidden-dirs flag logic. When the
+// flag is set, all skills are returned with a warning. Otherwise, hidden-dir
+// skills are excluded with an error if no standard skills remain.
 func filterHiddenDirSkills(opts *InstallOptions, allSkills []discovery.Skill) ([]discovery.Skill, error) {
 	cs := opts.IO.ColorScheme()
 
@@ -1198,25 +1267,16 @@ func filterHiddenDirSkills(opts *InstallOptions, allSkills []discovery.Skill) ([
 		return allSkills, nil
 	}
 
-	var standard []discovery.Skill
-	var hiddenCount int
-	for _, s := range allSkills {
-		if s.IsHiddenDirConvention() {
-			hiddenCount++
-		} else {
-			standard = append(standard, s)
-		}
-	}
-
-	if len(standard) == 0 && hiddenCount > 0 {
+	r := discovery.PartitionHiddenDirSkills(allSkills)
+	if len(r.Standard) == 0 && r.HiddenCount > 0 {
 		return nil, fmt.Errorf(
 			"no standard skills found, but %d skill(s) exist in hidden directories\n"+
 				"  Use --allow-hidden-dirs to include them",
-			hiddenCount,
+			r.HiddenCount,
 		)
 	}
 
-	return standard, nil
+	return r.Standard, nil
 }
 
 // checkUpstreamProvenance fetches the skill's SKILL.md via the contents API
